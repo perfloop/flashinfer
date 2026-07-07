@@ -88,27 +88,6 @@ from .utils import (
 )
 
 
-def _get_host_tensor(tensor: torch.Tensor, wrapper: Any, cache_name: str) -> torch.Tensor:
-    if tensor.device.type == "cpu":
-        return tensor
-    cache_attr = f"_{cache_name}_host_buf"
-    if not hasattr(wrapper, cache_attr) or getattr(wrapper, cache_attr).shape[0] < tensor.shape[0]:
-        setattr(
-            wrapper,
-            cache_attr,
-            torch.empty(
-                (tensor.shape[0] * 2,),
-                dtype=tensor.dtype,
-                pin_memory=True,
-                device="cpu",
-            )
-        )
-    host_buf = getattr(wrapper, cache_attr)[:tensor.shape[0]]
-    host_buf.copy_(tensor, non_blocking=True)
-    torch.cuda.current_stream(wrapper.device).synchronize()
-    return host_buf
-
-
 @functools.cache
 def get_single_decode_module(*args):
     uri = get_single_decode_uri(*args)
@@ -1014,12 +993,12 @@ class BatchDecodeWithPagedKVCacheWrapper:
                     "The size of indices should be less than or equal to the allocated buffer"
                 )
 
-        indptr_host = _get_host_tensor(indptr, self, "indptr")
-        last_page_len_host = _get_host_tensor(last_page_len, self, "last_page_len")
+        indptr_host = indptr if indptr.device.type == "cpu" else indptr.to("cpu", non_blocking=True)
+        last_page_len_host = last_page_len if last_page_len.device.type == "cpu" else last_page_len.to("cpu", non_blocking=True)
         if seq_lens is None:
             kv_lens_arr_host = get_seq_lens(indptr_host, last_page_len_host, page_size)
         else:
-            kv_lens_arr_host = _get_host_tensor(seq_lens, self, "seq_lens")
+            kv_lens_arr_host = seq_lens if seq_lens.device.type == "cpu" else seq_lens.to("cpu", non_blocking=True)
 
         backend = self._backend
         if backend in ("cute-dsl", "trtllm-gen"):
@@ -1274,8 +1253,8 @@ class BatchDecodeWithPagedKVCacheWrapper:
                 self.device, non_blocking=non_blocking
             )
 
-        indptr_host = _get_host_tensor(indptr, self, "indptr")
-        last_page_len_host = _get_host_tensor(last_page_len, self, "last_page_len")
+        indptr_host = indptr if indptr.device.type == "cpu" else indptr.to("cpu", non_blocking=True)
+        last_page_len_host = last_page_len if last_page_len.device.type == "cpu" else last_page_len.to("cpu", non_blocking=True)
 
         if data_type is not None:
             if q_data_type is None:
@@ -1310,7 +1289,7 @@ class BatchDecodeWithPagedKVCacheWrapper:
         if seq_lens is None:
             kv_lens_arr_host = get_seq_lens(indptr_host, last_page_len_host, page_size)
         else:
-            kv_lens_arr_host = _get_host_tensor(seq_lens, self, "seq_lens")
+            kv_lens_arr_host = seq_lens if seq_lens.device.type == "cpu" else seq_lens.to("cpu", non_blocking=True)
         if self._backend == "cute-dsl":
             if logits_soft_cap is not None and logits_soft_cap > 0:
                 raise NotImplementedError(
@@ -2303,7 +2282,7 @@ class BatchDecodeMlaWithPagedKVCacheWrapper:
             q_data_type = data_type
         q_data_type = canonicalize_torch_dtype(q_data_type)
 
-        indptr_host = _get_host_tensor(indptr, self, "indptr")
+        indptr_host = indptr if indptr.device.type == "cpu" else indptr.to("cpu", non_blocking=True)
 
         self._cached_module = get_batch_decode_mla_module(
             q_data_type,
