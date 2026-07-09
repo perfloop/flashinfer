@@ -18,6 +18,10 @@ def test_version_at_least():
 
 
 def test_version_at_least_none():
+    """Verify that version_at_least handles None inputs gracefully,
+    returning False instead of raising TypeError, which is crucial
+    for CPU-only setups where torch.version.cuda is None.
+    """
     assert flashinfer.utils.version_at_least(None, "12.1") is False
     assert flashinfer.utils.version_at_least("12.3", None) is False
     assert flashinfer.utils.version_at_least(None, None) is False
