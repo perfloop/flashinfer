@@ -809,19 +809,10 @@ class BatchDecodeWithPagedKVCacheWrapper:
             self._jit_additional_tensor_names = []
 
         self._kv_layout = kv_layout
-        _check_workspace_buffer_alignment(
-            float_workspace_buffer, "float_workspace_buffer"
-        )
         self._float_workspace_buffer = float_workspace_buffer
-        self._workspace_size = (
-            float_workspace_buffer.numel() * float_workspace_buffer.element_size()
-        )
         self.device = float_workspace_buffer.device
         self._int_workspace_buffer = torch.empty(
             (8 * 1024 * 1024,), dtype=torch.uint8, device=self.device
-        )
-        _check_workspace_buffer_alignment(
-            self._int_workspace_buffer, "int_workspace_buffer"
         )
         self._pin_memory_int_workspace_buffer = torch.empty(
             (8 * 1024 * 1024,),
@@ -830,10 +821,10 @@ class BatchDecodeWithPagedKVCacheWrapper:
             device="cpu",
         )
         self._kv_lens_buffer: Optional[torch.Tensor] = None
-        self._cached_batch_size_for_range_buf: Optional[int] = None
         self._cached_q_data_type: Optional[torch.dtype] = None
         self._cached_kv_data_type: Optional[torch.dtype] = None
         self._cached_o_data_type: Optional[torch.dtype] = None
+        self._cached_plan_key: Optional[tuple] = None
         if backend in ("trtllm-gen", "cute-dsl"):
             self._kv_lens_buffer = torch.empty(
                 (32768,), dtype=torch.int32, device=self.device
@@ -916,10 +907,6 @@ class BatchDecodeWithPagedKVCacheWrapper:
         _check_workspace_buffer_alignment(int_workspace_buffer, "int_workspace_buffer")
         self._float_workspace_buffer = float_workspace_buffer
         self._int_workspace_buffer = int_workspace_buffer
-        self._workspace_size = (
-            self._float_workspace_buffer.numel()
-            * self._float_workspace_buffer.element_size()
-        )
         self._pin_memory_int_workspace_buffer = torch.empty(
             self._int_workspace_buffer.shape,
             dtype=self._int_workspace_buffer.dtype,
@@ -1221,29 +1208,22 @@ class BatchDecodeWithPagedKVCacheWrapper:
 
         The :meth:`plan` method cannot be used in Cuda Graph or in ``torch.compile``.
         """
-        # Workspace size and buffer alignments are precomputed in __init__ and reset_workspace_buffer
-
-        if fixed_split_size is not None and not self.use_tensor_cores:
-            raise ValueError(
-                "fixed_split_size is only supported by tensor core decode for now."
-            )
+        _check_workspace_buffer_alignment(
+            self._float_workspace_buffer, "float_workspace_buffer"
+        )
+        _check_workspace_buffer_alignment(
+            self._int_workspace_buffer, "int_workspace_buffer"
+        )
+        self._workspace_size = (
+            self._float_workspace_buffer.numel()
+            * self._float_workspace_buffer.element_size()
+        )
 
         batch_size = len(last_page_len)
         if logits_soft_cap is None:
             logits_soft_cap = 0.0
 
-        if (
-            not hasattr(self, "_cached_batch_size_for_range_buf")
-            or self._cached_batch_size_for_range_buf != batch_size
-        ):
-            self._cached_batch_size_for_range_buf = batch_size
-            self._qo_indptr_host = _get_range_buf(batch_size + 1, "cpu")
-            if not self.is_cuda_graph_enabled:
-                self._qo_indptr_buf = self._qo_indptr_host.to(
-                    self.device, non_blocking=non_blocking
-                )
-        qo_indptr_host = self._qo_indptr_host
-
+        qo_indptr_host = _get_range_buf(batch_size + 1, "cpu")
         if self.is_cuda_graph_enabled:
             if batch_size != self._fixed_batch_size:
                 raise ValueError(
@@ -1264,24 +1244,18 @@ class BatchDecodeWithPagedKVCacheWrapper:
                 indices, non_blocking=(indices.device == self.device) and non_blocking
             )
         else:
-            if indptr.device == self.device:
-                self._paged_kv_indptr_buf = indptr
-            else:
-                self._paged_kv_indptr_buf = indptr.to(
-                    self.device, non_blocking=non_blocking
-                )
-            if indices.device == self.device:
-                self._paged_kv_indices_buf = indices
-            else:
-                self._paged_kv_indices_buf = indices.to(
-                    self.device, non_blocking=non_blocking
-                )
-            if last_page_len.device == self.device:
-                self._paged_kv_last_page_len_buf = last_page_len
-            else:
-                self._paged_kv_last_page_len_buf = last_page_len.to(
-                    self.device, non_blocking=non_blocking
-                )
+            self._paged_kv_indptr_buf = indptr.to(
+                self.device, non_blocking=non_blocking
+            )
+            self._paged_kv_indices_buf = indices.to(
+                self.device, non_blocking=non_blocking
+            )
+            self._paged_kv_last_page_len_buf = last_page_len.to(
+                self.device, non_blocking=non_blocking
+            )
+            self._qo_indptr_buf = qo_indptr_host.to(
+                self.device, non_blocking=non_blocking
+            )
 
         indptr_host = indptr.to("cpu")
         last_page_len_host = last_page_len.to("cpu")
@@ -1299,6 +1273,13 @@ class BatchDecodeWithPagedKVCacheWrapper:
         if o_data_type is None:
             o_data_type = q_data_type
         o_data_type = canonicalize_torch_dtype(o_data_type)
+
+        if fixed_split_size is not None and not self.use_tensor_cores:
+            raise ValueError(
+                "fixed_split_size is only supported by tensor core decode for now."
+            )
+        if fixed_split_size is None:
+            fixed_split_size = -1
 
         if self._backend == "auto":
             if {
@@ -1391,9 +1372,6 @@ class BatchDecodeWithPagedKVCacheWrapper:
             q_data_type = self._cached_q_data_type
             kv_data_type = self._cached_kv_data_type
             o_data_type = self._cached_o_data_type
-
-        if fixed_split_size is None:
-            fixed_split_size = -1
 
         self._batch_size = batch_size
         self._num_qo_heads = num_qo_heads
