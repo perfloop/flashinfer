@@ -1281,26 +1281,55 @@ class BatchDecodeWithPagedKVCacheWrapper:
         indptr_host = indptr.to("cpu")
         last_page_len_host = last_page_len.to("cpu")
 
+        if data_type is not None:
+            if q_data_type is None:
+                q_data_type = data_type
+            if kv_data_type is None:
+                kv_data_type = data_type
+
+        q_data_type = canonicalize_torch_dtype(q_data_type)
+        if kv_data_type is None:
+            kv_data_type = q_data_type
+        kv_data_type = canonicalize_torch_dtype(kv_data_type)
+        if o_data_type is None:
+            o_data_type = q_data_type
+        o_data_type = canonicalize_torch_dtype(o_data_type)
+
+        if self._backend == "auto":
+            if {
+                torch.float8_e4m3fn,
+                torch.float8_e5m2,
+            } & {q_data_type, kv_data_type}:
+                self._backend = determine_attention_backend(
+                    self.device,
+                    PosEncodingMode[pos_encoding_mode].value,
+                    False,  # use_fp16_qk_reductions
+                    False,  # use_custom_mask
+                    q_data_type,
+                    kv_data_type,
+                    head_dim_qk=head_dim,
+                    head_dim_vo=head_dim,
+                )
+            else:
+                self._backend = "fa2"
+
+        cache_key = (
+            q_data_type,
+            kv_data_type,
+            o_data_type,
+            indptr.dtype,
+            head_dim,
+            pos_encoding_mode,
+            window_left,
+            logits_soft_cap,
+            self._backend,
+        )
+
         if (
             not hasattr(self, "_cached_module")
-            or getattr(self, "_cached_q_data_type", None) != q_data_type
-            or getattr(self, "_cached_kv_data_type", None) != kv_data_type
-            or getattr(self, "_cached_o_data_type", None) != o_data_type
+            or getattr(self, "_cached_plan_key", None) != cache_key
         ):
-            if data_type is not None:
-                if q_data_type is None:
-                    q_data_type = data_type
-                if kv_data_type is None:
-                    kv_data_type = data_type
-
-            q_data_type = canonicalize_torch_dtype(q_data_type)
-            if kv_data_type is None:
-                kv_data_type = q_data_type
-            kv_data_type = canonicalize_torch_dtype(kv_data_type)
-            if o_data_type is None:
-                o_data_type = q_data_type
-            o_data_type = canonicalize_torch_dtype(o_data_type)
-
+            self._cached_plan_key = cache_key
             self._cached_q_data_type = q_data_type
             self._cached_kv_data_type = kv_data_type
             self._cached_o_data_type = o_data_type
@@ -1330,23 +1359,6 @@ class BatchDecodeWithPagedKVCacheWrapper:
                 if self._jit_module is not None:
                     self._cached_module = self._jit_module
                 else:
-                    if self._backend == "auto":
-                        if {
-                            torch.float8_e4m3fn,
-                            torch.float8_e5m2,
-                        } & {q_data_type, kv_data_type}:
-                            self._backend = determine_attention_backend(
-                                self.device,
-                                PosEncodingMode[pos_encoding_mode].value,
-                                False,  # use_fp16_qk_reductions
-                                False,  # use_custom_mask
-                                q_data_type,
-                                kv_data_type,
-                                head_dim_qk=head_dim,
-                                head_dim_vo=head_dim,
-                            )
-                        else:
-                            self._backend = "fa2"
                     self._cached_module = get_batch_prefill_module(
                         self._backend,
                         q_data_type,

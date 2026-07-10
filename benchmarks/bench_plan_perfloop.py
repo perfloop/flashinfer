@@ -40,7 +40,6 @@ def main():
         workspace_buffer, kv_layout="NHD", use_tensor_cores=True
     )
 
-    # 1. Warm-up iterations to JIT compile kernels and stabilize CPU/GPU states
     for _ in range(20):
         wrapper.plan(
             kv_indptr,
@@ -54,7 +53,6 @@ def main():
             q_data_type=q_dtype,
         )
 
-    # 2. Run statistical timed iterations using CPU wall-clock timer (time.perf_counter)
     durations = []
     for _ in range(100):
         start = time.perf_counter()
@@ -72,10 +70,8 @@ def main():
         end = time.perf_counter()
         durations.append((end - start) * 1000.0)  # convert to milliseconds
 
-    # 3. Calculate median execution time to handle scheduling noise and CPU scheduling jitter
     median_ms = np.median(durations)
 
-    # Emit exact Perfloop JSONL format
     print(f'{{"metric": "ms", "value": {median_ms:.6f}}}')
 
 
