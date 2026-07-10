@@ -238,3 +238,98 @@ def test_batch_prefill_workspace_size_rejects_unaligned_workspace_buffer():
             _byte_workspace(1024),
             _unaligned_byte_workspace(1024),
         )
+
+
+def test_batch_decode_wrapper_plan_caching_correctness():
+    batch_size = 4
+    kv_len = 1024
+    page_size = 16
+    num_qo_heads = 16
+    num_kv_heads = 4
+    dtype = torch.float16
+
+    indptr, indices, last_page_len = _paged_kv_inputs(batch_size, kv_len, page_size)
+    wrapper = flashinfer.decode.BatchDecodeWithPagedKVCacheWrapper(
+        _byte_workspace(128 * 1024 * 1024)
+    )
+
+    # 1. First call: compiles/resolves the module
+    wrapper.plan(
+        indptr,
+        indices,
+        last_page_len,
+        num_qo_heads,
+        num_kv_heads,
+        128,  # head_dim
+        page_size,
+        q_data_type=dtype,
+        kv_data_type=dtype,
+    )
+    first_module = wrapper._cached_module
+    first_key = wrapper._cached_plan_key
+    assert first_module is not None
+    assert first_key is not None
+
+    # 2. Second call with identical params: should hit cache and reuse module
+    wrapper.plan(
+        indptr,
+        indices,
+        last_page_len,
+        num_qo_heads,
+        num_kv_heads,
+        128,  # head_dim
+        page_size,
+        q_data_type=dtype,
+        kv_data_type=dtype,
+    )
+    assert wrapper._cached_module is first_module
+    assert wrapper._cached_plan_key == first_key
+
+    # 3. Third call with different head_dim: should invalidate cache and re-resolve
+    wrapper.plan(
+        indptr,
+        indices,
+        last_page_len,
+        num_qo_heads,
+        num_kv_heads,
+        64,  # head_dim = 64
+        page_size,
+        q_data_type=dtype,
+        kv_data_type=dtype,
+    )
+    assert wrapper._cached_module is not first_module
+    assert wrapper._cached_plan_key != first_key
+
+    # 4. Sequential validation check: should raise ValueError if fixed_split_size is passed without tensor cores
+    non_tc_wrapper = flashinfer.decode.BatchDecodeWithPagedKVCacheWrapper(
+        _byte_workspace(32 * 1024 * 1024), use_tensor_cores=False
+    )
+    # Plan first with fixed_split_size=None (supported)
+    non_tc_wrapper.plan(
+        indptr,
+        indices,
+        last_page_len,
+        num_qo_heads,
+        num_kv_heads,
+        128,
+        page_size,
+        q_data_type=dtype,
+        kv_data_type=dtype,
+        fixed_split_size=None,
+    )
+    # Plan second with fixed_split_size=5 (not supported without tensor cores, should raise ValueError)
+    with pytest.raises(
+        ValueError, match="fixed_split_size is only supported by tensor core decode"
+    ):
+        non_tc_wrapper.plan(
+            indptr,
+            indices,
+            last_page_len,
+            num_qo_heads,
+            num_kv_heads,
+            128,
+            page_size,
+            q_data_type=dtype,
+            kv_data_type=dtype,
+            fixed_split_size=5,
+        )

@@ -1223,6 +1223,11 @@ class BatchDecodeWithPagedKVCacheWrapper:
         """
         # Workspace size and buffer alignments are precomputed in __init__ and reset_workspace_buffer
 
+        if fixed_split_size is not None and not self.use_tensor_cores:
+            raise ValueError(
+                "fixed_split_size is only supported by tensor core decode for now."
+            )
+
         batch_size = len(last_page_len)
         if logits_soft_cap is None:
             logits_soft_cap = 0.0
@@ -1333,11 +1338,6 @@ class BatchDecodeWithPagedKVCacheWrapper:
             self._cached_q_data_type = q_data_type
             self._cached_kv_data_type = kv_data_type
             self._cached_o_data_type = o_data_type
-
-            if fixed_split_size is not None and not self.use_tensor_cores:
-                raise ValueError(
-                    "fixed_split_size is only supported by tensor core decode for now."
-                )
 
             # Resolve the module
             if self._backend == "cute-dsl":
